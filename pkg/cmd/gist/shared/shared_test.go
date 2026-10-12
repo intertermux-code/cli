@@ -1,8 +1,11 @@
 package shared
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -76,6 +79,16 @@ func TestIsBinaryContents(t *testing.T) {
 			fileContent: []byte(nil),
 		},
 		{
+			want:        false,
+			fileContent: []byte("caf\xc3\xa9 r\xc3\xa9sum\xc3\xa9\n"), // valid UTF-8
+		},
+		{
+			// latin-1 sniffs as text/plain but cannot survive JSON encoding,
+			// so it must be treated as binary rather than silently corrupted
+			want:        true,
+			fileContent: []byte("caf\xe9 r\xe9sum\xe9\n"),
+		},
+		{
 			want: true,
 			fileContent: []byte{239, 191, 189, 239, 191, 189, 239, 191, 189, 239,
 				191, 189, 239, 191, 189, 16, 74, 70, 73, 70, 239, 191, 189, 1, 1, 1,
@@ -91,6 +104,44 @@ func TestIsBinaryContents(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, IsBinaryContents(tt.fileContent))
 	}
+}
+
+func TestIsBinaryFile(t *testing.T) {
+	writeFile := func(t *testing.T, name string, content []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("latin-1 file is binary", func(t *testing.T) {
+		path := writeFile(t, "latin1.txt", []byte("caf\xe9 r\xe9sum\xe9\n"))
+		isBinary, err := IsBinaryFile(path)
+		assert.NoError(t, err)
+		assert.True(t, isBinary)
+	})
+
+	t.Run("valid UTF-8 file is not binary", func(t *testing.T) {
+		path := writeFile(t, "utf8.txt", []byte("caf\xc3\xa9 r\xc3\xa9sum\xc3\xa9\n"))
+		isBinary, err := IsBinaryFile(path)
+		assert.NoError(t, err)
+		assert.False(t, isBinary)
+	})
+
+	t.Run("invalid UTF-8 past the MIME sniff window is binary", func(t *testing.T) {
+		content := append(bytes.Repeat([]byte("a"), 5000), 0xe9)
+		path := writeFile(t, "late-invalid.txt", content)
+		isBinary, err := IsBinaryFile(path)
+		assert.NoError(t, err)
+		assert.True(t, isBinary)
+	})
+
+	t.Run("missing file returns an error", func(t *testing.T) {
+		_, err := IsBinaryFile(filepath.Join(t.TempDir(), "nope.txt"))
+		assert.Error(t, err)
+	})
 }
 
 func TestPromptGists(t *testing.T) {
