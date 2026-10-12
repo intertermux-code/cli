@@ -656,6 +656,24 @@ func TestTokenForUserInsecureLogin(t *testing.T) {
 	require.Equal(t, "oauth_token", source)
 }
 
+func TestTokenForUserPrefersProfileOverKeyring(t *testing.T) {
+	// Given a user has logged in insecurely, so the selected profile holds a
+	// per-user token, and the global keyring holds an older token for the
+	// same login written by another config profile
+	authCfg := newTestAuthConfig(t)
+	_, err := authCfg.Login("github.com", "test-user", "gho_FRESH", "ssh", false)
+	require.NoError(t, err)
+	require.NoError(t, keyring.Set("gh:github.com", "test-user", "gho_STALE"))
+
+	// When we get the token for that user
+	token, source, err := authCfg.TokenForUser("github.com", "test-user")
+
+	// Then it returns the selected profile's credential, not the keyring one
+	require.NoError(t, err)
+	require.Equal(t, "gho_FRESH", token)
+	require.Equal(t, "oauth_token", source)
+}
+
 func TestTokenForUserNotFoundErrors(t *testing.T) {
 	// Given a user has not logged in
 	authCfg := newTestAuthConfig(t)

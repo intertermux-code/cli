@@ -6,6 +6,7 @@ import (
 
 	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/keyring"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
@@ -243,6 +244,20 @@ func TestTokenRunSecureStorage(t *testing.T) {
 			cfgStubs: func(t *testing.T, cfg gh.Config) {
 				login(t, cfg, "github.com", "test-user", "gho_ABCDEFG", "https", true)
 				login(t, cfg, "github.com", "test-user-2", "gho_1234567", "https", true)
+			},
+			wantStdout: "gho_ABCDEFG\n",
+		},
+		{
+			name: "token for user ignores profile token",
+			opts: TokenOptions{
+				Hostname: "github.com",
+				Username: "test-user",
+			},
+			cfgStubs: func(t *testing.T, cfg gh.Config) {
+				// Even when the selected profile holds a per-user token,
+				// --secure-storage lookup stays keyring-only.
+				login(t, cfg, "github.com", "test-user", "gho_INSECURE", "https", false)
+				require.NoError(t, keyring.Set("gh:github.com", "test-user", "gho_ABCDEFG"))
 			},
 			wantStdout: "gho_ABCDEFG\n",
 		},
