@@ -2223,3 +2223,61 @@ func issueNodeIDByNumberMatcher(number int) httpmock.Matcher {
 		return b.Variables.Number == number
 	}
 }
+
+func TestIssueCreate_assigneeFailureStillOutputsURL(t *testing.T) {
+	http := &httpmock.Registry{}
+	defer http.Verify(t)
+
+	http.Register(
+		httpmock.GraphQL(`query IssueRepositoryInfo\b`),
+		httpmock.StringResponse(`
+		{ "data": { "repository": {
+			"id": "REPOID",
+			"hasIssuesEnabled": true
+		} } }
+	`))
+	http.Register(
+		httpmock.GraphQL(`mutation IssueCreate\b`),
+		httpmock.GraphQLMutation(`
+		{ "data": { "createIssue": { "issue": {
+			"id": "NEWISSUEID",
+			"URL": "https://github.com/OWNER/REPO/issues/12"
+		} } } }
+	`, func(inputs map[string]any) {
+			assert.Equal(t, "hello", inputs["title"])
+			assert.Equal(t, "world", inputs["body"])
+		}))
+	http.Register(
+		httpmock.GraphQL(`mutation ReplaceActorsForAssignable\b`),
+		httpmock.StringResponse(`
+		{ "errors": [{ "message": "user doesn't have the correct permissions" }] }
+	`))
+
+	output, err := runCommand(http, true, `-a monalisa -t hello -b "world"`, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "permissions")
+	assert.Equal(t, "https://github.com/OWNER/REPO/issues/12\n", output.String())
+}
+
+func TestIssueCreate_creationFailureDoesNotOutputURL(t *testing.T) {
+	http := &httpmock.Registry{}
+	defer http.Verify(t)
+
+	http.Register(
+		httpmock.GraphQL(`query IssueRepositoryInfo\b`),
+		httpmock.StringResponse(`
+		{ "data": { "repository": {
+			"id": "REPOID",
+			"hasIssuesEnabled": true
+		} } }
+	`))
+	http.Register(
+		httpmock.GraphQL(`mutation IssueCreate\b`),
+		httpmock.StringResponse(`
+		{ "errors": [{ "message": "cannot create issue" }] }
+	`))
+
+	output, err := runCommand(http, true, `-t hello -b "world"`, nil)
+	assert.Error(t, err)
+	assert.Empty(t, output.String())
+}

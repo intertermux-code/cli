@@ -113,3 +113,21 @@ func Test_PreserveInput(t *testing.T) {
 		})
 	}
 }
+
+func Test_PreserveInput_CleanedState(t *testing.T) {
+	ios, _, _, errOut := iostreams.Test()
+
+	state := &IssueMetadataState{
+		Type:      IssueMetadata,
+		Title:     "title",
+		Body:      "body",
+		Assignees: []string{"monalisa"},
+	}
+	state.Clean()
+
+	err := errors.New("assignment failed")
+	PreserveInput(ios, state, &err)()
+
+	assert.False(t, state.IsDirty())
+	assert.Equal(t, "", errOut.String())
+}

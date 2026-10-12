@@ -480,6 +480,15 @@ func createRun(opts *CreateOptions) (err error) {
 
 		var newIssue *api.Issue
 		newIssue, err = api.IssueCreate(apiClient, repo, params)
+		if newIssue != nil {
+			// The issue was created even if a post-creation step (e.g.
+			// assignment) failed, so always show its URL: without it the
+			// error looks like nothing was created and retrying produces a
+			// duplicate issue. Cleaning the input state also suppresses the
+			// --recover prompt, which would duplicate the issue as well.
+			tb.Clean()
+			fmt.Fprintln(opts.IO.Out, newIssue.URL)
+		}
 		if err != nil {
 			return
 		}
@@ -492,8 +501,6 @@ func createRun(opts *CreateOptions) (err error) {
 		if err = api.DeferredUpdateIssue(apiClient, updateOpts); err != nil {
 			return
 		}
-
-		fmt.Fprintln(opts.IO.Out, newIssue.URL)
 	} else {
 		panic("Unreachable state")
 	}

@@ -41,14 +41,25 @@ type IssueMetadataState struct {
 
 	MetadataResult *api.RepoMetadataResult
 
-	dirty bool // whether user i/o has modified this
+	dirty   bool // whether user i/o has modified this
+	cleaned bool // whether the state has been consumed by a successful creation
 }
 
 func (tb *IssueMetadataState) MarkDirty() {
 	tb.dirty = true
 }
 
+// Clean marks the state as consumed, e.g. when the issue or PR was already
+// created on the server and the input must not be offered back via --recover,
+// since recovering would create a duplicate.
+func (tb *IssueMetadataState) Clean() {
+	tb.cleaned = true
+}
+
 func (tb *IssueMetadataState) IsDirty() bool {
+	if tb.cleaned {
+		return false
+	}
 	return tb.dirty || tb.HasMetadata()
 }
 
