@@ -196,6 +196,7 @@ type mergeContext struct {
 	isTerminal         bool
 	merged             bool
 	localBranchExists  bool
+	localBranchTip     string
 	autoMerge          bool
 	crossRepoPR        bool
 	deleteBranch       bool
@@ -401,6 +402,11 @@ func (m *mergeContext) deleteLocalBranch() error {
 
 	ctx := context.Background()
 
+	if ok, reason := localBranchSafeToDelete(m, ctx); !ok {
+		_ = m.warnf("%s Skipping local branch delete: %s\n", m.cs.WarningIcon(), reason)
+		return nil
+	}
+
 	worktrees, err := m.opts.GitClient.Worktrees(ctx)
 	if err != nil {
 		_ = m.warnf("%s Could not inspect worktrees; skipping local branch delete: %s\n", m.cs.WarningIcon(), err)
@@ -513,6 +519,58 @@ func (m *mergeContext) deleteLocalBranch() error {
 	return m.infof("%s Deleted local branch %s%s\n", m.cs.SuccessIconWithColor(m.cs.Red), m.cs.Cyan(m.pr.HeadRefName), switchedStatement)
 }
 
+// localBranchSafeToDelete reports whether the local branch matching the pull
+// request's head branch may be deleted, and if not, why.
+//
+// A pull request can be selected by URL, which leaves local cleanup enabled
+// but says nothing about which local repository gh is standing in. Because
+// the head branch would otherwise be matched by name alone, a same-named
+// branch in an unrelated repository used to be force-deleted along with the
+// pull request's branch - and any linked worktree checking it out was removed
+// with it. Both checks fail closed: unless the branch is clearly the pull
+// request's own, the local repository is left untouched.
+func localBranchSafeToDelete(m *mergeContext, ctx context.Context) (bool, string) {
+	// The pull request has to belong to a repository this directory is a clone
+	// of, otherwise a same-named branch found here is somebody else's work.
+	// Remotes are compared by owner and name rather than by URL string: the
+	// same repository is reachable through many URL spellings, and matching on
+	// one of them would mistake a clone of the right repository for a clone of
+	// an unrelated one. Only the base repository counts: a fork whose name
+	// collides with the base repository's would make the check a name
+	// comparison again, which is the bug being fixed here.
+	if m.opts.Remotes == nil {
+		return false, "could not determine the repositories of the current directory"
+	}
+	remotes, err := m.opts.Remotes()
+	if err != nil {
+		return false, fmt.Sprintf("could not determine the repositories of the current directory: %s", err)
+	}
+	if _, err := remotes.FindByRepo(m.baseRepo.RepoOwner(), m.baseRepo.RepoName()); err != nil {
+		return false, fmt.Sprintf("this directory is not a clone of %s", ghrepo.FullName(m.baseRepo))
+	}
+
+	// The branch can be in the right repository and still be work of its own:
+	// deleting it runs `git branch -D`, which skips the merged-check git would
+	// otherwise apply, so only delete when every commit on the local branch is
+	// already part of the pull request head.
+	if m.pr.HeadRefOid == "" {
+		// headRefOid is populated by the pull request query in NewMergeContext
+		// and is non-null for a real pull request, so an empty value means it
+		// was not populated rather than that there is nothing to compare
+		// against. Keep the pre-guard behavior instead of guessing which way
+		// to err.
+		return true, ""
+	}
+	onPRHead, err := m.opts.GitClient.IsAncestor(ctx, m.localBranchTip, m.pr.HeadRefOid)
+	if err != nil {
+		return false, fmt.Sprintf("could not compare local branch %s with the head of pull request %s#%d: %s", m.pr.HeadRefName, ghrepo.FullName(m.baseRepo), m.pr.Number, err)
+	}
+	if !onPRHead {
+		return false, fmt.Sprintf("local branch %s has commits that are not in pull request %s#%d", m.pr.HeadRefName, ghrepo.FullName(m.baseRepo), m.pr.Number)
+	}
+	return true, ""
+}
+
 // Delete the remote branch if requested and if allowed.
 func (m *mergeContext) deleteRemoteBranch() error {
 	// the user was already asked if they want to delete the branch if they didn't provide the flag
@@ -580,6 +638,18 @@ func NewMergeContext(opts *MergeOptions) (*mergeContext, error) {
 		return nil, err
 	}
 
+	// Resolve the local tip once, up front: a branch matched by name alone is
+	// not safe to delete (see localBranchSafeToDelete). The lookup is skipped
+	// when local deletion is disabled so that callers without a git client
+	// keep working.
+	var localBranchTip string
+	localBranchExists := false
+	if opts.CanDeleteLocalBranch {
+		var tipErr error
+		localBranchTip, tipErr = opts.GitClient.LocalBranchTip(context.Background(), pr.HeadRefName)
+		localBranchExists = tipErr == nil
+	}
+
 	return &mergeContext{
 		opts:               opts,
 		pr:                 pr,
@@ -591,7 +661,8 @@ func NewMergeContext(opts *MergeOptions) (*mergeContext, error) {
 		deleteBranch:       opts.DeleteBranch,
 		crossRepoPR:        pr.IsCrossRepository,
 		autoMerge:          opts.AutoMergeEnable && !isImmediatelyMergeable(pr.MergeStateStatus),
-		localBranchExists:  opts.CanDeleteLocalBranch && opts.GitClient.HasLocalBranch(context.Background(), pr.HeadRefName),
+		localBranchExists:  localBranchExists,
+		localBranchTip:     localBranchTip,
 		mergeQueueRequired: pr.IsMergeQueueEnabled,
 	}, nil
 }

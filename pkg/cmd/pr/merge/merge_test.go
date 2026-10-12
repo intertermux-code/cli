@@ -255,6 +255,21 @@ func runCommand(rt http.RoundTripper, pm *prompter.PrompterMock, branch string, 
 }
 
 func runCommandWithBranchFunc(rt http.RoundTripper, pm *prompter.PrompterMock, branch func() (string, error), isTTY bool, cli string) (*test.CmdOut, error) {
+	return runCommandWithRemotes(rt, pm, branch, defaultTestRemotes(), isTTY, cli)
+}
+
+func defaultTestRemotes() context.Remotes {
+	return []*context.Remote{
+		{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("OWNER", "REPO"),
+		},
+	}
+}
+
+func runCommandWithRemotes(rt http.RoundTripper, pm *prompter.PrompterMock, branch func() (string, error), remotes context.Remotes, isTTY bool, cli string) (*test.CmdOut, error) {
 	ios, _, stdout, stderr := iostreams.Test()
 	ios.SetStdoutTTY(isTTY)
 	ios.SetStdinTTY(isTTY)
@@ -267,14 +282,7 @@ func runCommandWithBranchFunc(rt http.RoundTripper, pm *prompter.PrompterMock, b
 		},
 		Branch: branch,
 		Remotes: func() (context.Remotes, error) {
-			return []*context.Remote{
-				{
-					Remote: &git.Remote{
-						Name: "origin",
-					},
-					Repo: ghrepo.New("OWNER", "REPO"),
-				},
-			}, nil
+			return remotes, nil
 		},
 		GitClient: &git.Client{
 			GhPath:  "some/path/gh",
@@ -629,6 +637,7 @@ func TestPrMerge_deleteBranch(t *testing.T) {
 			State:            "OPEN",
 			Title:            "Blueberries are a good fruit",
 			HeadRefName:      "blueberries",
+			HeadRefOid:       "abc123",
 			BaseRefName:      "main",
 			MergeStateStatus: "CLEAN",
 		},
@@ -651,7 +660,8 @@ func TestPrMerge_deleteBranch(t *testing.T) {
 
 	cs.Register(`git rev-parse --verify refs/heads/main`, 0, "")
 	cs.Register(`git checkout main`, 0, "")
-	cs.Register(`git rev-parse --verify refs/heads/blueberries`, 0, "")
+	cs.Register(`git rev-parse --verify refs/heads/blueberries`, 0, "abc123\n")
+	cs.Register(`git merge-base --is-ancestor abc123 abc123`, 0, "")
 	cs.Register(`git worktree list --porcelain`, 0, singleWorktree("blueberries"))
 	cs.Register(`git rev-parse --show-toplevel`, 0, "/path/to/repo")
 	cs.Register(`git branch -D blueberries`, 0, "")
@@ -666,6 +676,120 @@ func TestPrMerge_deleteBranch(t *testing.T) {
 	assert.Equal(t, heredoc.Doc(`
 		✓ Merged pull request OWNER/REPO#10 (Blueberries are a good fruit)
 		✓ Deleted local branch blueberries and switched to branch main
+		✓ Deleted remote branch blueberries
+	`), output.Stderr())
+}
+
+func TestPrMerge_deleteBranch_urlFromUnrelatedRepo(t *testing.T) {
+	http := initFakeHTTP()
+	defer http.Verify(t)
+
+	prURL := "https://github.com/OWNER/REPO/pull/10"
+	shared.StubFinderForRunCommandStyleTests(t,
+		prURL,
+		&api.PullRequest{
+			ID:               "PR_10",
+			Number:           10,
+			State:            "OPEN",
+			Title:            "Blueberries are a good fruit",
+			HeadRefName:      "blueberries",
+			HeadRefOid:       "abc123",
+			BaseRefName:      "main",
+			MergeStateStatus: "CLEAN",
+		},
+		baseRepo("OWNER", "REPO", "main"),
+	)
+
+	http.Register(
+		httpmock.GraphQL(`mutation PullRequestMerge\b`),
+		httpmock.GraphQLMutation(`{}`, func(input map[string]any) {
+			assert.Equal(t, "PR_10", input["pullRequestId"].(string))
+			assert.Equal(t, "MERGE", input["mergeMethod"].(string))
+			assert.NotContains(t, input, "commitHeadline")
+		}))
+	http.Register(
+		httpmock.REST("DELETE", "repos/OWNER/REPO/git/refs/heads%2Fblueberries"),
+		httpmock.StringResponse(`{}`))
+
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	// A same-named branch exists in this checkout, checked out in a linked
+	// worktree. Deliberately no stubs for `git worktree remove` or
+	// `git branch -D`: the test fails if the command attempts either, since
+	// the branch and the worktree belong to an unrelated repository.
+	cs.Register(`git rev-parse --verify refs/heads/blueberries`, 0, "fff000\n")
+
+	unrelatedRemotes := context.Remotes{
+		{
+			Remote: &git.Remote{Name: "origin"},
+			Repo:   ghrepo.New("OTHER", "UNRELATED"),
+		},
+	}
+	output, err := runCommandWithRemotes(http, nil, func() (string, error) {
+		return "main", nil
+	}, unrelatedRemotes, true, prURL+` --merge --delete-branch`)
+	if err != nil {
+		t.Fatalf("Got unexpected error running `pr merge` %s", err)
+	}
+
+	assert.Equal(t, "", output.String())
+	assert.Equal(t, heredoc.Doc(`
+		✓ Merged pull request OWNER/REPO#10 (Blueberries are a good fruit)
+		! Skipping local branch delete: this directory is not a clone of OWNER/REPO
+		✓ Deleted remote branch blueberries
+	`), output.Stderr())
+}
+
+func TestPrMerge_deleteBranch_localBranchNotOnPRHead(t *testing.T) {
+	http := initFakeHTTP()
+	defer http.Verify(t)
+
+	shared.StubFinderForRunCommandStyleTests(t,
+		"10",
+		&api.PullRequest{
+			ID:               "PR_10",
+			Number:           10,
+			State:            "OPEN",
+			Title:            "Blueberries are a good fruit",
+			HeadRefName:      "blueberries",
+			HeadRefOid:       "abc123",
+			BaseRefName:      "main",
+			MergeStateStatus: "CLEAN",
+		},
+		baseRepo("OWNER", "REPO", "main"),
+	)
+
+	http.Register(
+		httpmock.GraphQL(`mutation PullRequestMerge\b`),
+		httpmock.GraphQLMutation(`{}`, func(input map[string]any) {
+			assert.Equal(t, "PR_10", input["pullRequestId"].(string))
+			assert.Equal(t, "MERGE", input["mergeMethod"].(string))
+			assert.NotContains(t, input, "commitHeadline")
+		}))
+	http.Register(
+		httpmock.REST("DELETE", "repos/OWNER/REPO/git/refs/heads%2Fblueberries"),
+		httpmock.StringResponse(`{}`))
+
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	// The local branch holds a commit that is not part of the pull request
+	// head, so force-deleting it would strand that work. Deliberately no stub
+	// for `git worktree remove` or `git branch -D`: the test fails if the
+	// command attempts either.
+	cs.Register(`git rev-parse --verify refs/heads/blueberries`, 0, "fff000\n")
+	cs.Register(`git merge-base --is-ancestor fff000 abc123`, 1, "")
+
+	output, err := runCommand(http, nil, "blueberries", true, `pr merge --merge --delete-branch 10`)
+	if err != nil {
+		t.Fatalf("Got unexpected error running `pr merge` %s", err)
+	}
+
+	assert.Equal(t, "", output.String())
+	assert.Equal(t, heredoc.Doc(`
+		✓ Merged pull request OWNER/REPO#10 (Blueberries are a good fruit)
+		! Skipping local branch delete: local branch blueberries has commits that are not in pull request OWNER/REPO#10
 		✓ Deleted remote branch blueberries
 	`), output.Stderr())
 }
@@ -2351,6 +2475,7 @@ func TestPrMerge_deleteBranch_worktrees(t *testing.T) {
 					Number:           3,
 					Title:            "The title of the PR",
 					HeadRefName:      "feature",
+					HeadRefOid:       "def456",
 					MergeStateStatus: "CLEAN",
 					BaseRefName:      "main",
 				},
@@ -2370,7 +2495,8 @@ func TestPrMerge_deleteBranch_worktrees(t *testing.T) {
 			cs, cmdTeardown := run.Stub()
 			defer cmdTeardown(t)
 
-			cs.Register(`git rev-parse --verify refs/heads/feature`, 0, "")
+			cs.Register(`git rev-parse --verify refs/heads/feature`, 0, "def456\n")
+			cs.Register(`git merge-base --is-ancestor def456 def456`, 0, "")
 			cs.Register(`git worktree list --porcelain`, tt.worktreeExitCode, tt.worktreeList)
 			if tt.worktreeExitCode == 0 {
 				cs.Register(`git rev-parse --show-toplevel`, tt.toplevelExitCode, tt.toplevel)
@@ -2410,6 +2536,7 @@ func TestPrMerge_deleteBranch_noWorktreeConflict(t *testing.T) {
 			Number:           3,
 			Title:            "The title of the PR",
 			HeadRefName:      "feature",
+			HeadRefOid:       "def456",
 			MergeStateStatus: "CLEAN",
 			BaseRefName:      "main",
 		},
@@ -2429,7 +2556,8 @@ func TestPrMerge_deleteBranch_noWorktreeConflict(t *testing.T) {
 	cs, cmdTeardown := run.Stub()
 	defer cmdTeardown(t)
 
-	cs.Register(`git rev-parse --verify refs/heads/feature`, 0, "")
+	cs.Register(`git rev-parse --verify refs/heads/feature`, 0, "def456\n")
+	cs.Register(`git merge-base --is-ancestor def456 def456`, 0, "")
 	cs.Register(`git worktree list --porcelain`, 0, heredoc.Doc(`
 		worktree /path/to/main
 		HEAD abc123
