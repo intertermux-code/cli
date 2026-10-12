@@ -6,6 +6,7 @@ import (
 
 	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/keyring"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
@@ -245,6 +246,19 @@ func TestTokenRunSecureStorage(t *testing.T) {
 				login(t, cfg, "github.com", "test-user-2", "gho_1234567", "https", true)
 			},
 			wantStdout: "gho_ABCDEFG\n",
+		},
+		{
+			name: "token for active user, not last globally activated user",
+			opts: TokenOptions{},
+			cfgStubs: func(t *testing.T, cfg gh.Config) {
+				login(t, cfg, "github.com", "test-user", "gho_ABCDEFG", "https", true)
+				login(t, cfg, "github.com", "test-user-2", "gho_1234567", "https", true)
+				// The unkeyed keyring slot is global across config dirs and holds
+				// the last activated token; simulate test-user having been
+				// activated globally after this config's active user was set.
+				require.NoError(t, keyring.Set("gh:github.com", "", "gho_ABCDEFG"))
+			},
+			wantStdout: "gho_1234567\n",
 		},
 	}
 

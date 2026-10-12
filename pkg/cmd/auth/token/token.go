@@ -72,7 +72,18 @@ func tokenRun(opts *TokenOptions) error {
 	// behavior. For now, keeping it all inline is simplest.
 	if opts.SecureStorage {
 		if opts.Username == "" {
-			val, _ = authCfg.TokenFromKeyring(hostname)
+			// Resolve the active user from this config, mirroring the
+			// non-secure path, so the token belongs to the active account
+			// here rather than whichever account was last activated globally.
+			// Fall back to the unkeyed slot for keyrings written by old CLI
+			// versions, as ActiveToken does.
+			username, err := authCfg.ActiveUser(hostname)
+			if err == nil {
+				val, err = authCfg.TokenFromKeyringForUser(hostname, username)
+			}
+			if err != nil {
+				val, _ = authCfg.TokenFromKeyring(hostname)
+			}
 		} else {
 			val, _ = authCfg.TokenFromKeyringForUser(hostname, opts.Username)
 		}
