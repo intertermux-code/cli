@@ -92,9 +92,33 @@ func aggregateChecks(checkContexts []api.CheckContext, requiredChecks bool) (che
 	return
 }
 
+// checkStartTime returns the time used to rank a check for recency. A check
+// run that has not started yet reports a zero StartedAt; a StatusContext
+// never has a StartedAt at all, so its CreatedAt is used instead.
+func checkStartTime(c api.CheckContext) time.Time {
+	if !c.StartedAt.IsZero() {
+		return c.StartedAt
+	}
+	if c.Context != "" {
+		return c.CreatedAt
+	}
+	return time.Time{}
+}
+
 // eliminateDuplicates filters a set of checks to only the most recent ones if the set includes repeated runs
 func eliminateDuplicates(checkContexts []api.CheckContext) []api.CheckContext {
-	sort.Slice(checkContexts, func(i, j int) bool { return checkContexts[i].StartedAt.After(checkContexts[j].StartedAt) })
+	// A re-queued check run has not started yet, so its start time is the zero
+	// time. Rank not-started runs ahead of started ones so the queued re-run -
+	// not the completed run it supersedes - survives deduplication.
+	sort.SliceStable(checkContexts, func(i, j int) bool {
+		ti := checkStartTime(checkContexts[i])
+		tj := checkStartTime(checkContexts[j])
+
+		if ti.IsZero() != tj.IsZero() {
+			return ti.IsZero()
+		}
+		return ti.After(tj)
+	})
 
 	mapChecks := make(map[string]struct{})
 	mapContexts := make(map[string]struct{})
